@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+requests
+pydantic
+groq
+google-genai
+matplotlib
+numpy

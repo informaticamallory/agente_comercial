@@ -1,0 +1,25 @@
+# Ambiente virtual
+.venv/
+venv/
+
+# Variáveis de ambiente / segredos
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDEs
+.vscode/
+.idea/
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+
+# Logs / temporários
+*.log
+*.tmp
