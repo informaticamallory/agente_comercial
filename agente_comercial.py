@@ -2641,6 +2641,36 @@ def corrigir_agrupamento_explicito(
     )
 
 
+
+def _pergunta_pede_ano_inteiro(pergunta):
+    """
+    Detecta quando o usuário quer o acumulado/total do ano,
+    sem restringir ao mês atual.
+    """
+    texto = _texto_normalizado(pergunta)
+
+    padroes = [
+        r"\btotal\s+(?:do|no)\s+ano\b",
+        r"\bacumulad[oa]\s+(?:do|no)\s+ano\b",
+        r"\bacumulado\s+anual\b",
+        r"\bano\s+inteiro\b",
+        r"\bano\s+atual\b",
+        r"\bno\s+ano\b",
+        r"\bao\s+longo\s+do\s+ano\b",
+        r"\bdurante\s+o\s+ano\b",
+        r"\bresultado\s+(?:do|no)\s+ano\b",
+        r"\bfaturamento\s+(?:do|no)\s+ano\b",
+        r"\bmargem\s+(?:liquida|bruta)\s+(?:do|no)\s+ano\b",
+        r"\bmeta\s+(?:do|no)\s+ano\b",
+        r"\bquantidade\s+(?:do|no)\s+ano\b",
+    ]
+
+    return any(
+        re.search(padrao, texto)
+        for padrao in padroes
+    )
+
+
 def corrigir_periodo_explicito(
     pergunta,
     interpretacao
@@ -2681,6 +2711,12 @@ def corrigir_periodo_explicito(
         else None
     )
 
+    pede_ano_inteiro = (
+        _pergunta_pede_ano_inteiro(
+            pergunta
+        )
+    )
+
     # --------------------------------------------------------
     # MÊS + ANO
     # --------------------------------------------------------
@@ -2716,16 +2752,21 @@ def corrigir_periodo_explicito(
         )
 
     # --------------------------------------------------------
-    # SOMENTE ANO
+    # SOMENTE ANO / PEDIDO EXPLÍCITO DO ANO INTEIRO
     # --------------------------------------------------------
 
     elif (
-        ano_encontrado
-        and not mes_encontrado
+        not mes_encontrado
+        and (
+            ano_encontrado
+            or pede_ano_inteiro
+        )
     ):
 
         interpretacao.filtros.ano = (
             ano_encontrado
+            if ano_encontrado
+            else "Ano atual"
         )
 
         interpretacao.filtros.mes = None
@@ -3935,7 +3976,7 @@ def montar_contexto_final(
 
         if (
             "ano" in filtros_usuario
-            and "mes" not in filtros_usuario
+            and filtros_usuario.get("mes") is None
         ):
 
             contexto.pop(
@@ -7246,6 +7287,8 @@ def _extrair_periodo_pergunta(pergunta):
     match_ano = re.search(r"\b(20\d{2})\b", texto)
     if match_ano:
         filtros["ano"] = match_ano.group(1)
+    elif _pergunta_pede_ano_inteiro(pergunta):
+        filtros["ano"] = "Ano atual"
 
     meses_sem_acento = {
         "janeiro": "01", "fevereiro": "02", "marco": "03",
