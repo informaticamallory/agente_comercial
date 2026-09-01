@@ -11765,6 +11765,8 @@ def _granularidade_grafico_dia_semana(pergunta):
             "diariamente",
             "diario",
             "diaria",
+            "a cada dia",
+            "em cada dia",
         ]
     ):
         return "dia"
@@ -12162,6 +12164,83 @@ def gerar_grafico_temporal_dia_semana(pergunta, indicador=None):
         "resposta": resposta,
         "imagem_base64": imagem,
         "nome_arquivo": nome_arquivo,
+    }
+
+
+def gerar_resposta_temporal_texto(pergunta):
+    """
+    Retorna série diária/semanal em TEXTO quando o usuário pede explicitamente
+    "dia a dia", "por dia", "por semana" etc. sem pedir gráfico.
+
+    Esta rotina é aditiva e reutiliza exatamente as mesmas consultas temporais
+    dos gráficos. Se mês/ano não forem informados, usa mês/ano atuais.
+    """
+    if usuario_pediu_grafico(pergunta):
+        return None
+
+    granularidade = _granularidade_grafico_dia_semana(pergunta)
+
+    if granularidade is None:
+        return None
+
+    indicador = _indicador_da_pergunta(pergunta)
+
+    if indicador not in mapa_indicadores:
+        return None
+
+    config = mapa_indicadores[indicador]
+    periodo = _periodo_mes_grafico_temporal(pergunta)
+    filtros_base = _filtros_comerciais_grafico_temporal(pergunta)
+
+    if granularidade == "dia":
+        serie = _consultar_serie_diaria(
+            indicador,
+            periodo["inicio"],
+            periodo["fim"],
+            filtros_base
+        )
+
+        linhas = [
+            f"{config['descricao']} dia a dia de {periodo['rotulo']}:"
+        ]
+
+        for item in serie:
+            valor = item["valor"]
+            if valor is None:
+                valor = 0
+
+            linhas.append(
+                f"{item['data'].strftime('%d')}: "
+                f"{formatar_valor(valor, config['formato'])}"
+            )
+
+    else:
+        serie = _consultar_serie_semanal(
+            indicador,
+            periodo["inicio"],
+            periodo["fim"],
+            filtros_base
+        )
+
+        linhas = [
+            f"{config['descricao']} por semana de {periodo['rotulo']}:"
+        ]
+
+        for item in serie:
+            valor = item["valor"]
+            if valor is None:
+                valor = 0
+
+            linhas.append(
+                f"Sem. {item['numero']} "
+                f"({item['inicio'].strftime('%d/%m')}–"
+                f"{item['fim'].strftime('%d/%m')}): "
+                f"{formatar_valor(valor, config['formato'])}"
+            )
+
+    return {
+        "tipo_resposta": "texto",
+        "resposta": "\n".join(linhas)
     }
 
 
@@ -13630,6 +13709,23 @@ def receber_pergunta(dados: PerguntaRequest):
                     f"{time.perf_counter() - _t_processar_inicio:.3f}s"
                 )
                 return previsao_mensal
+
+            # ====================================================
+            # SÉRIE DIÁRIA / SEMANAL EM TEXTO
+            # ====================================================
+            # Ex.: "faturamento dia a dia de agosto".
+            # Se o usuário pedir gráfico, o fluxo continua para a rotina
+            # de gráficos já existente, sem qualquer alteração nela.
+            temporal_texto = gerar_resposta_temporal_texto(
+                dados.pergunta
+            )
+
+            if temporal_texto is not None:
+                print(
+                    f"[TEMPO PROCESSAR] Caminho temporal texto: "
+                    f"{time.perf_counter() - _t_processar_inicio:.3f}s"
+                )
+                return temporal_texto
 
             # ====================================================
             # MÚLTIPLOS INDICADORES
