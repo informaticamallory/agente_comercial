@@ -813,6 +813,19 @@ class FiltrosPergunta(BaseModel):
     analise_credito: Optional[str] = None
 
 
+class PeriodoRelativoPergunta(BaseModel):
+    # A IA apenas normaliza a intenção temporal.
+    # O Python continua sendo a fonte de verdade para calcular as datas.
+    unidade: Literal[
+        "mes",
+        "ano",
+        "trimestre",
+        "semestre",
+        "bimestre"
+    ]
+    deslocamento: int = 0
+
+
 class InterpretacaoPergunta(BaseModel):
 
     operacao: OperacaoPermitida
@@ -826,6 +839,11 @@ class InterpretacaoPergunta(BaseModel):
     top_n: Optional[int] = None
 
     ordem: Optional[OrdemPermitida] = None
+
+    # Usado somente quando a IA reconhece um período relativo em
+    # linguagem natural que não foi capturado pelas regras locais.
+    # Ex.: "último mês" -> {"unidade": "mes", "deslocamento": 1}.
+    periodo_relativo: Optional[PeriodoRelativoPergunta] = None
 
     fora_escopo: bool = False
 
@@ -1743,6 +1761,7 @@ Estrutura:
   "agrupar_por": null,
   "top_n": null,
   "ordem": null,
+  "periodo_relativo": null,
   "fora_escopo": false
 }}
 
@@ -1780,6 +1799,21 @@ Exemplos de equivalência semântica:
   compreensíveis não devem impedir a interpretação.
 
 IMPORTANTE:
+- Para PERÍODOS RELATIVOS, normalize a intenção no campo
+  "periodo_relativo" e NÃO tente calcular mês/ano por conta própria.
+  O Python calculará a faixa exata de datas.
+- Estrutura de periodo_relativo:
+  {"unidade": "mes|ano|trimestre|semestre|bimestre", "deslocamento": N}
+- Exemplos semânticos:
+  "este mês", "mês atual" -> {"unidade": "mes", "deslocamento": 0}
+  "último mês", "mês passado", "mês anterior", "mês que passou"
+    -> {"unidade": "mes", "deslocamento": 1}
+  "mês retrasado" -> {"unidade": "mes", "deslocamento": 2}
+  "último trimestre" / "trimestre passado"
+    -> {"unidade": "trimestre", "deslocamento": 1}
+  A mesma lógica vale para ano, semestre e bimestre.
+- Quando periodo_relativo for usado, NÃO preencha filtros.ano ou filtros.mes
+  com uma data calculada ou herdada do contexto anterior.
 - NÃO invente um indicador, dimensão, filtro ou operação que não exista
   nas listas permitidas deste prompt;
 - NÃO force uma interpretação quando houver ambiguidade real;
@@ -3219,13 +3253,101 @@ def _periodo_diario_pergunta(pergunta):
     return None
 
 
-def _aplicar_periodo_calendario(pergunta, filtros):
+def _periodo_relativo_da_interpretacao(interpretacao):
+    """
+    Converte a intenção temporal normalizada pela IA em datas reais.
+
+    A IA informa somente a unidade e o deslocamento. O cálculo de datas
+    continua determinístico no Python, evitando que expressões como
+    "último mês" dependam de a IA adivinhar que mês é esse.
+    """
+    if interpretacao is None:
+        return None
+
+    periodo_ia = getattr(interpretacao, "periodo_relativo", None)
+    if periodo_ia is None:
+        return None
+
+    unidade = getattr(periodo_ia, "unidade", None)
+
+    try:
+        deslocamento = int(getattr(periodo_ia, "deslocamento", 0))
+    except (TypeError, ValueError):
+        return None
+
+    if deslocamento < 0 or deslocamento > 120:
+        return None
+
+    hoje = _data_atual_negocio()
+
+    if unidade == "mes":
+        total_meses = hoje.year * 12 + (hoje.month - 1) - deslocamento
+        ano = total_meses // 12
+        mes = total_meses % 12 + 1
+        inicio = date(ano, mes, 1)
+        fim = _ultimo_dia_mes(ano, mes)
+        nome_mes = meses_nome.get(f"{mes:02d}", f"{mes:02d}")
+        return {
+            "inicio": inicio,
+            "fim": fim,
+            "rotulo": f"em {nome_mes} de {ano}",
+            "tipo": "mes",
+        }
+
+    if unidade == "ano":
+        ano = hoje.year - deslocamento
+        return {
+            "inicio": date(ano, 1, 1),
+            "fim": date(ano, 12, 31),
+            "rotulo": f"em {ano}",
+            "tipo": "ano",
+        }
+
+    tamanhos = {
+        "trimestre": 3,
+        "semestre": 6,
+        "bimestre": 2,
+    }
+
+    tamanho_meses = tamanhos.get(unidade)
+    if tamanho_meses is None:
+        return None
+
+    indice_atual = (hoje.month - 1) // tamanho_meses
+    total_periodos_ano = 12 // tamanho_meses
+    absoluto = hoje.year * total_periodos_ano + indice_atual - deslocamento
+    ano = absoluto // total_periodos_ano
+    indice = absoluto % total_periodos_ano
+    mes_inicio = indice * tamanho_meses + 1
+    mes_fim = mes_inicio + tamanho_meses - 1
+    inicio = date(ano, mes_inicio, 1)
+    fim = _ultimo_dia_mes(ano, mes_fim)
+
+    return {
+        "inicio": inicio,
+        "fim": fim,
+        "rotulo": (
+            f"no {indice + 1}º {unidade} de {ano} "
+            f"({inicio.strftime('%d/%m/%Y')} a {fim.strftime('%d/%m/%Y')})"
+        ),
+        "tipo": unidade,
+    }
+
+
+def _aplicar_periodo_calendario(pergunta, filtros, interpretacao=None):
     """
     Injeta o intervalo diário nos filtros finais usados por qualquer
     indicador/operação. Os filtros de ano/mês são retirados para não
     limitar intervalos que atravessam mês ou ano.
+
+    Prioridade:
+    1) regras temporais locais já existentes;
+    2) período relativo normalizado pela IA, apenas como fallback.
     """
     periodo = _periodo_diario_pergunta(pergunta)
+
+    if periodo is None:
+        periodo = _periodo_relativo_da_interpretacao(interpretacao)
 
     if periodo is None:
         return dict(filtros or {})
@@ -6262,7 +6384,8 @@ def _filtros_para_multiplos_indicadores(pergunta):
 
     filtros = _aplicar_periodo_calendario(
         pergunta,
-        filtros
+        filtros,
+        interpretacao
     )
 
     return (
@@ -7382,7 +7505,8 @@ def perguntar(
     # qualquer operação (valor, ranking, resumo de meta/gerencial).
     filtros = _aplicar_periodo_calendario(
         pergunta,
-        filtros
+        filtros,
+        interpretacao
     )
 
 
