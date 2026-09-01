@@ -12018,7 +12018,7 @@ def gerar_grafico_temporal_dia_semana(pergunta, indicador=None):
         )
 
         rotulos = [
-            item["data"].strftime("%d/%m")
+            item["data"].strftime("%d")
             for item in serie
         ]
         valores = [
