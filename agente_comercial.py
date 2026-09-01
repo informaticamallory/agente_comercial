@@ -1748,6 +1748,50 @@ Estrutura:
 
 
 ============================================================
+INTERPRETAÇÃO SEMÂNTICA — REGRA PRINCIPAL
+============================================================
+
+Interprete a INTENÇÃO e o SIGNIFICADO da pergunta, e não apenas
+palavras ou frases exatas listadas neste prompt.
+
+As palavras e exemplos abaixo são referências de negócio, NÃO uma
+lista fechada de sinônimos. O usuário pode usar outras formas de
+falar, abreviações, linguagem informal, flexões verbais, pequenos
+erros de digitação ou expressões equivalentes.
+
+Quando uma expressão nova tiver significado claramente equivalente
+a um indicador, dimensão, operação ou filtro permitido, normalize-a
+para o valor canônico deste JSON.
+
+Exemplos de equivalência semântica:
+- "quanto entrou", "quanto faturou", "receita realizada" podem
+  significar faturamento quando o contexto comercial deixar isso claro;
+- "quem comprou mais", "maior comprador", "cliente que mais levou"
+  podem representar ranking de cliente por quantidade;
+- "quem vendeu mais", "maior volume vendido", "mais unidades" podem
+  representar quantidade;
+- "quem deu mais receita", "quem mais faturou", "maior faturamento"
+  podem representar ranking por faturamento;
+- "vendedor", quando usado claramente para a pessoa responsável pela
+  venda, pode representar representante;
+- "linha de produto" e variações semanticamente equivalentes devem ser
+  normalizadas para a dimensão linha;
+- erros simples como "faturameto", "margem liquda" ou abreviações
+  compreensíveis não devem impedir a interpretação.
+
+IMPORTANTE:
+- NÃO invente um indicador, dimensão, filtro ou operação que não exista
+  nas listas permitidas deste prompt;
+- NÃO force uma interpretação quando houver ambiguidade real;
+- use fora_escopo=true somente quando a pergunta realmente não pertencer
+  ao domínio comercial suportado;
+- se a intenção comercial estiver clara, escolha o conceito permitido
+  semanticamente mais próximo, mesmo que a frase exata nunca tenha sido
+  cadastrada antes;
+- preserve filtros e contexto anterior somente quando forem compatíveis
+  com a pergunta atual.
+
+============================================================
 OPERAÇÕES
 ============================================================
 
@@ -4394,8 +4438,12 @@ def interpretar_pergunta(pergunta):
             return local, "local"
 
     # --------------------------------------------------------
-    # GROQ
+    # IA SEMÂNTICA (GROQ)
     # --------------------------------------------------------
+    # Tudo que já foi reconhecido com segurança pelas rotas locais
+    # retorna antes daqui. Quando surgir uma forma nova de perguntar,
+    # a IA interpreta o significado e normaliza para os conceitos
+    # canônicos já suportados pelo agente.
 
     try:
 
