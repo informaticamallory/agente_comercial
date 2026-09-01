@@ -2800,6 +2800,87 @@ def _periodo_relativo_amplo(pergunta):
 
         return None
 
+    # MÊS
+    # Mantém esta regra dentro do mesmo interpretador temporal para que
+    # "mês atual", "mês passado", "mês anterior", "mês retrasado"
+    # e "há X meses" sejam convertidos em uma faixa real de datas.
+    texto_mes = texto
+
+    desloc_mes = None
+
+    if re.search(
+        r"\b(?:mes\s+atual|este\s+mes|neste\s+mes|nesse\s+mes)\b",
+        texto_mes
+    ):
+        desloc_mes = 0
+
+    elif re.search(
+        r"\b(?:mes\s+passado|mes\s+anterior)\b",
+        texto_mes
+    ):
+        desloc_mes = 1
+
+    elif re.search(
+        r"\bmes\s+retrasado\b",
+        texto_mes
+    ):
+        desloc_mes = 2
+
+    else:
+        m_mes = re.search(
+            r"\bha\s+(\d+)\s+mes(?:es)?\b",
+            texto_mes
+        )
+
+        if m_mes:
+            desloc_mes = int(m_mes.group(1))
+
+    if desloc_mes is not None:
+        total_meses = (
+            hoje.year * 12
+            + (hoje.month - 1)
+            - desloc_mes
+        )
+
+        ano = total_meses // 12
+        mes = total_meses % 12 + 1
+
+        inicio = date(
+            ano,
+            mes,
+            1
+        )
+
+        fim = _ultimo_dia_mes(
+            ano,
+            mes
+        )
+
+        nome_mes = meses_nome.get(
+            f"{mes:02d}",
+            f"{mes:02d}"
+        )
+
+        rotulo_base = (
+            "neste mês"
+            if desloc_mes == 0
+            else "no mês passado"
+            if desloc_mes == 1
+            else "no mês retrasado"
+            if desloc_mes == 2
+            else f"há {desloc_mes} meses"
+        )
+
+        return {
+            "inicio": inicio,
+            "fim": fim,
+            "rotulo": (
+                f"{rotulo_base} "
+                f"({nome_mes} de {ano})"
+            ),
+            "tipo": "mes",
+        }
+
     # ANO
     desloc = deslocamento_unidade("ano")
     if desloc is not None:
