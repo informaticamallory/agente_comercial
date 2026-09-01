@@ -26,7 +26,8 @@ except Exception:
     pass
 
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 from typing import Optional, Literal
 
 from pydantic import BaseModel
@@ -2671,6 +2672,312 @@ def _pergunta_pede_ano_inteiro(pergunta):
     )
 
 
+# ============================================================
+# PERÍODOS EM NÍVEL DE DIA
+# ============================================================
+
+def _data_atual_negocio():
+    """
+    Data de referência do agente no fuso da operação no Brasil.
+    Evita que "hoje"/"ontem" mudem antes da hora por causa do UTC
+    do container.
+    """
+    try:
+        return datetime.now(
+            ZoneInfo("America/Fortaleza")
+        ).date()
+    except Exception:
+        return datetime.now().date()
+
+
+def _ultimo_dia_mes(ano, mes):
+    if mes == 12:
+        proximo = date(ano + 1, 1, 1)
+    else:
+        proximo = date(ano, mes + 1, 1)
+
+    return proximo - timedelta(days=1)
+
+
+def _mes_ano_explicitos_para_periodo(pergunta):
+    """
+    Extrai mês/ano citados. Quando um deles não é informado,
+    usa o mês/ano atuais, conforme regra de negócio solicitada.
+    """
+    texto = _texto_normalizado(pergunta)
+    hoje = _data_atual_negocio()
+
+    meses = {
+        "janeiro": 1,
+        "fevereiro": 2,
+        "marco": 3,
+        "abril": 4,
+        "maio": 5,
+        "junho": 6,
+        "julho": 7,
+        "agosto": 8,
+        "setembro": 9,
+        "outubro": 10,
+        "novembro": 11,
+        "dezembro": 12,
+    }
+
+    mes = None
+    for nome, numero in meses.items():
+        if re.search(r"\b" + re.escape(nome) + r"\b", texto):
+            mes = numero
+            break
+
+    match_ano = re.search(r"\b(20\d{2})\b", texto)
+    ano = int(match_ano.group(1)) if match_ano else None
+
+    return {
+        "mes": mes if mes is not None else hoje.month,
+        "ano": ano if ano is not None else hoje.year,
+        "mes_explicito": mes is not None,
+        "ano_explicito": ano is not None,
+    }
+
+
+def _periodo_diario_pergunta(pergunta):
+    """
+    Converte expressões temporais em um intervalo fechado de datas.
+
+    Retorno:
+        None, quando não há período diário especial; ou
+        {"inicio": date, "fim": date, "rotulo": str}
+    """
+    texto = _texto_normalizado(pergunta)
+    hoje = _data_atual_negocio()
+
+    # --------------------------------------------------------
+    # DATA EXPLÍCITA: 13/08/2026, 13-08-2026, dia 13/08
+    # --------------------------------------------------------
+    m = re.search(
+        r"\b(?:dia\s+)?([0-3]?\d)[/-]([01]?\d)(?:[/-](20\d{2}))?\b",
+        texto
+    )
+    if m:
+        dia = int(m.group(1))
+        mes = int(m.group(2))
+        ano = int(m.group(3)) if m.group(3) else hoje.year
+
+        try:
+            alvo = date(ano, mes, dia)
+        except ValueError:
+            return None
+
+        return {
+            "inicio": alvo,
+            "fim": alvo,
+            "rotulo": f"no dia {alvo.strftime('%d/%m/%Y')}"
+        }
+
+    # --------------------------------------------------------
+    # DATA POR EXTENSO: dia 13 de agosto de 2026
+    # --------------------------------------------------------
+    meses = {
+        "janeiro": 1, "fevereiro": 2, "marco": 3,
+        "abril": 4, "maio": 5, "junho": 6,
+        "julho": 7, "agosto": 8, "setembro": 9,
+        "outubro": 10, "novembro": 11, "dezembro": 12
+    }
+    nomes_meses_regex = "|".join(meses.keys())
+
+    m = re.search(
+        rf"\b(?:dia\s+)?([0-3]?\d)\s+de\s+({nomes_meses_regex})"
+        rf"(?:\s+de\s+(20\d{{2}}))?\b",
+        texto
+    )
+    if m:
+        dia = int(m.group(1))
+        mes = meses[m.group(2)]
+        ano = int(m.group(3)) if m.group(3) else hoje.year
+
+        try:
+            alvo = date(ano, mes, dia)
+        except ValueError:
+            return None
+
+        return {
+            "inicio": alvo,
+            "fim": alvo,
+            "rotulo": f"no dia {alvo.strftime('%d/%m/%Y')}"
+        }
+
+    # --------------------------------------------------------
+    # SOMENTE DIA: "dia 13" -> mês e ano atuais
+    # --------------------------------------------------------
+    m = re.search(r"\bdia\s+([0-3]?\d)\b", texto)
+    if m:
+        dia = int(m.group(1))
+
+        try:
+            alvo = date(hoje.year, hoje.month, dia)
+        except ValueError:
+            return None
+
+        return {
+            "inicio": alvo,
+            "fim": alvo,
+            "rotulo": f"no dia {alvo.strftime('%d/%m/%Y')}"
+        }
+
+    # --------------------------------------------------------
+    # HOJE / ONTEM
+    # --------------------------------------------------------
+    if re.search(r"\bhoje\b", texto):
+        return {
+            "inicio": hoje,
+            "fim": hoje,
+            "rotulo": f"hoje ({hoje.strftime('%d/%m/%Y')})"
+        }
+
+    if re.search(r"\bontem\b", texto):
+        alvo = hoje - timedelta(days=1)
+        return {
+            "inicio": alvo,
+            "fim": alvo,
+            "rotulo": f"ontem ({alvo.strftime('%d/%m/%Y')})"
+        }
+
+    # --------------------------------------------------------
+    # SEMANA PASSADA / ESTA SEMANA
+    # Semana comercial considerada de segunda a domingo.
+    # Para a semana atual, vai de segunda até hoje.
+    # --------------------------------------------------------
+    if re.search(r"\bsemana\s+passada\b", texto):
+        inicio_semana_atual = hoje - timedelta(days=hoje.weekday())
+        fim = inicio_semana_atual - timedelta(days=1)
+        inicio = fim - timedelta(days=6)
+
+        return {
+            "inicio": inicio,
+            "fim": fim,
+            "rotulo": (
+                "na semana passada "
+                f"({inicio.strftime('%d/%m/%Y')} a {fim.strftime('%d/%m/%Y')})"
+            )
+        }
+
+    if re.search(
+        r"\b(?:esta|essa|desta|dessa)\s+semana\b|\bsemana\s+atual\b",
+        texto
+    ):
+        inicio = hoje - timedelta(days=hoje.weekday())
+        fim = hoje
+
+        return {
+            "inicio": inicio,
+            "fim": fim,
+            "rotulo": (
+                "nesta semana "
+                f"({inicio.strftime('%d/%m/%Y')} a {fim.strftime('%d/%m/%Y')})"
+            )
+        }
+
+    referencia = _mes_ano_explicitos_para_periodo(pergunta)
+    ano = referencia["ano"]
+    mes = referencia["mes"]
+    ultimo_mes = _ultimo_dia_mes(ano, mes)
+    nome_mes = meses_nome.get(f"{mes:02d}", f"{mes:02d}")
+
+    # --------------------------------------------------------
+    # PRIMEIRA / SEGUNDA QUINZENA
+    # --------------------------------------------------------
+    if re.search(r"\bprimeira\s+quinzena\b|\b1[ªa]?\s+quinzena\b", texto):
+        inicio = date(ano, mes, 1)
+        fim = date(ano, mes, 15)
+
+        return {
+            "inicio": inicio,
+            "fim": fim,
+            "rotulo": f"na primeira quinzena de {nome_mes} de {ano}"
+        }
+
+    if re.search(r"\bsegunda\s+quinzena\b|\b2[ªa]?\s+quinzena\b", texto):
+        inicio = date(ano, mes, 16)
+        fim = ultimo_mes
+
+        return {
+            "inicio": inicio,
+            "fim": fim,
+            "rotulo": f"na segunda quinzena de {nome_mes} de {ano}"
+        }
+
+    # --------------------------------------------------------
+    # PRIMEIRO / ÚLTIMO DIA DO MÊS
+    # --------------------------------------------------------
+    if re.search(r"\bprimeiro\s+dia\b|\b1[oº]?\s+dia\b", texto):
+        alvo = date(ano, mes, 1)
+        return {
+            "inicio": alvo,
+            "fim": alvo,
+            "rotulo": f"no primeiro dia de {nome_mes} de {ano}"
+        }
+
+    if re.search(r"\bultimo\s+dia\b", texto):
+        alvo = ultimo_mes
+        return {
+            "inicio": alvo,
+            "fim": alvo,
+            "rotulo": f"no último dia de {nome_mes} de {ano}"
+        }
+
+    # --------------------------------------------------------
+    # ÚLTIMOS X DIAS
+    # Sem mês/ano explícitos: termina hoje.
+    # Com mês e/ou ano explícitos: termina no último dia daquele mês.
+    # --------------------------------------------------------
+    m = re.search(r"\bultimos\s+(\d{1,3})\s+dias\b", texto)
+    if m:
+        qtd = int(m.group(1))
+
+        if not (1 <= qtd <= 366):
+            return None
+
+        if referencia["mes_explicito"] or referencia["ano_explicito"]:
+            fim = ultimo_mes
+        else:
+            fim = hoje
+
+        inicio = fim - timedelta(days=qtd - 1)
+
+        return {
+            "inicio": inicio,
+            "fim": fim,
+            "rotulo": (
+                f"nos últimos {qtd} dias "
+                f"({inicio.strftime('%d/%m/%Y')} a {fim.strftime('%d/%m/%Y')})"
+            )
+        }
+
+    return None
+
+
+def _aplicar_periodo_calendario(pergunta, filtros):
+    """
+    Injeta o intervalo diário nos filtros finais usados por qualquer
+    indicador/operação. Os filtros de ano/mês são retirados para não
+    limitar intervalos que atravessam mês ou ano.
+    """
+    periodo = _periodo_diario_pergunta(pergunta)
+
+    if periodo is None:
+        return dict(filtros or {})
+
+    novos = dict(filtros or {})
+
+    novos.pop("ano", None)
+    novos.pop("mes", None)
+
+    novos["_data_inicio"] = periodo["inicio"].isoformat()
+    novos["_data_fim"] = periodo["fim"].isoformat()
+    novos["_periodo_rotulo"] = periodo["rotulo"]
+
+    return novos
+
+
 def corrigir_periodo_explicito(
     pergunta,
     interpretacao
@@ -3970,6 +4277,19 @@ def montar_contexto_final(
     if filtros_usuario:
 
         # ----------------------------------------------------
+        # PERÍODO EM NÍVEL DE DIA
+        # ----------------------------------------------------
+        # Quando há uma faixa de datas explícita, ela substitui os
+        # defaults de ano/mês. Isso é essencial para "últimos X dias"
+        # e semanas que podem atravessar a virada do mês/ano.
+        if (
+            filtros_usuario.get("_data_inicio")
+            or filtros_usuario.get("_data_fim")
+        ):
+            contexto.pop("ano", None)
+            contexto.pop("mes", None)
+
+        # ----------------------------------------------------
         # SE O USUÁRIO INFORMOU ANO, MAS NÃO INFORMOU MÊS,
         # CONSULTA O ANO INTEIRO
         # ----------------------------------------------------
@@ -4025,6 +4345,31 @@ def gerar_filtros_dax(
 
         if valor is None:
 
+            continue
+
+        # ----------------------------------------------------
+        # FILTRO INTERNO DE PERÍODO DIÁRIO
+        # ----------------------------------------------------
+        if nome_filtro == "_periodo_rotulo":
+            continue
+
+        if nome_filtro in {"_data_inicio", "_data_fim"}:
+            try:
+                ano_data, mes_data, dia_data = [
+                    int(parte)
+                    for parte in str(valor).split("-")
+                ]
+            except Exception as erro:
+                raise ValueError(
+                    f"Data inválida no filtro {nome_filtro}: {valor}"
+                ) from erro
+
+            operador = ">=" if nome_filtro == "_data_inicio" else "<="
+
+            filtros_dax.append(
+                "'# CALENDÁRIO'[data] "
+                f"{operador} DATE({ano_data}, {mes_data}, {dia_data})"
+            )
             continue
 
 
@@ -4791,6 +5136,17 @@ def construir_contexto_resposta(
         partes.append(
             f"do produto "
             f"{filtros['produto']}"
+        )
+
+
+    # --------------------------------------------------------
+    # PERÍODO EM NÍVEL DE DIA
+    # --------------------------------------------------------
+
+    if filtros.get("_periodo_rotulo"):
+
+        partes.append(
+            filtros["_periodo_rotulo"]
         )
 
 
@@ -5572,6 +5928,11 @@ def _filtros_para_multiplos_indicadores(pergunta):
 
                 break
 
+        filtros = _aplicar_periodo_calendario(
+            pergunta,
+            filtros
+        )
+
         return (
             filtros,
             "local"
@@ -5587,6 +5948,11 @@ def _filtros_para_multiplos_indicadores(pergunta):
         .model_dump(
             exclude_none=True
         )
+    )
+
+    filtros = _aplicar_periodo_calendario(
+        pergunta,
+        filtros
     )
 
     return (
@@ -6698,6 +7064,13 @@ def perguntar(
         .model_dump(
             exclude_none=True
         )
+    )
+
+    # Períodos em nível de dia valem para qualquer indicador e
+    # qualquer operação (valor, ranking, resumo de meta/gerencial).
+    filtros = _aplicar_periodo_calendario(
+        pergunta,
+        filtros
     )
 
 
