@@ -5781,16 +5781,49 @@ def construir_resposta_ranking(
         else:
             sujeito = descricao
 
-        if filtros.get("mes"):
-            periodo = (
-                f" em {nome_mes_resposta(filtros['mes'])}"
-                if not isinstance(filtros["mes"], list)
-                else ""
-            )
-        elif filtros.get("ano") and filtros["ano"] != "Ano atual":
-            periodo = f" em {filtros['ano']}"
-        else:
-            periodo = " neste mês"
+        # Para períodos resolvidos por faixa de datas (ex.: "último mês"),
+        # o texto da resposta deve refletir a faixa REAL consultada, e não
+        # cair no rótulo genérico "neste mês".
+        periodo = None
+
+        data_inicio_txt = filtros.get("_data_inicio")
+        data_fim_txt = filtros.get("_data_fim")
+
+        if data_inicio_txt and data_fim_txt:
+            try:
+                data_inicio = date.fromisoformat(str(data_inicio_txt)[:10])
+                data_fim = date.fromisoformat(str(data_fim_txt)[:10])
+
+                # Quando a faixa representa um mês calendário completo,
+                # mantém o padrão natural já usado pelo agente: "em agosto".
+                if (
+                    data_inicio.day == 1
+                    and data_inicio.year == data_fim.year
+                    and data_inicio.month == data_fim.month
+                    and data_fim == _ultimo_dia_mes(data_inicio.year, data_inicio.month)
+                ):
+                    periodo = f" em {nome_mes_resposta(data_inicio.month)}"
+                elif filtros.get("_periodo_rotulo"):
+                    rotulo_periodo = str(filtros["_periodo_rotulo"]).strip()
+                    periodo = (
+                        rotulo_periodo
+                        if rotulo_periodo.startswith(" ")
+                        else f" {rotulo_periodo}"
+                    )
+            except Exception:
+                periodo = None
+
+        if periodo is None:
+            if filtros.get("mes"):
+                periodo = (
+                    f" em {nome_mes_resposta(filtros['mes'])}"
+                    if not isinstance(filtros["mes"], list)
+                    else ""
+                )
+            elif filtros.get("ano") and filtros["ano"] != "Ano atual":
+                periodo = f" em {filtros['ano']}"
+            else:
+                periodo = " neste mês"
 
         artigo = "A" if sujeito in [
             "varejista",
