@@ -2731,12 +2731,144 @@ def _mes_ano_explicitos_para_periodo(pergunta):
     match_ano = re.search(r"\b(20\d{2})\b", texto)
     ano = int(match_ano.group(1)) if match_ano else None
 
+    # Referências relativas de mês. Só entram quando não há mês nominal explícito.
+    if mes is None:
+        deslocamento = None
+
+        if re.search(r"\b(?:mes atual|este mes|neste mes|nesse mes)\b", texto):
+            deslocamento = 0
+        elif re.search(r"\b(?:mes passado|mes anterior)\b", texto):
+            deslocamento = 1
+        elif re.search(r"\bmes retrasado\b", texto):
+            deslocamento = 2
+        else:
+            match_ha_meses = re.search(r"\bha\s+(\d+)\s+mes(?:es)?\b", texto)
+            if match_ha_meses:
+                deslocamento = int(match_ha_meses.group(1))
+
+        if deslocamento is not None:
+            total_meses = hoje.year * 12 + (hoje.month - 1) - deslocamento
+            ano = total_meses // 12
+            mes = total_meses % 12 + 1
+
     return {
         "mes": mes if mes is not None else hoje.month,
         "ano": ano if ano is not None else hoje.year,
         "mes_explicito": mes is not None,
         "ano_explicito": ano is not None,
     }
+
+
+
+def _periodo_relativo_amplo(pergunta):
+    """
+    Resolve períodos relativos completos sem alterar as regras antigas:
+    ano, trimestre, semestre e bimestre atual/passado/retrasado,
+    além de "há N anos/trimestres/semestres/bimestres".
+    Retorna None quando a pergunta não contém um desses períodos.
+    """
+    texto = _texto_normalizado(pergunta)
+    hoje = _data_atual_negocio()
+
+    def deslocamento_unidade(unidade):
+        singular = unidade
+        plural = {
+            "ano": "anos",
+            "trimestre": "trimestres",
+            "semestre": "semestres",
+            "bimestre": "bimestres",
+        }[unidade]
+
+        if re.search(
+            rf"\b(?:{singular}\s+atual|este\s+{singular}|neste\s+{singular}|nesse\s+{singular})\b",
+            texto
+        ):
+            return 0
+
+        if re.search(
+            rf"\b(?:{singular}\s+passado|{singular}\s+anterior)\b",
+            texto
+        ):
+            return 1
+
+        if re.search(rf"\b{singular}\s+retrasado\b", texto):
+            return 2
+
+        m = re.search(rf"\bha\s+(\d+)\s+{singular}(?:s)?\b", texto)
+        if m:
+            return int(m.group(1))
+
+        return None
+
+    # ANO
+    desloc = deslocamento_unidade("ano")
+    if desloc is not None:
+        ano = hoje.year - desloc
+        inicio = date(ano, 1, 1)
+        fim = date(ano, 12, 31)
+        rotulo_base = (
+            "neste ano" if desloc == 0
+            else "no ano passado" if desloc == 1
+            else "no ano retrasado" if desloc == 2
+            else f"há {desloc} anos"
+        )
+        return {
+            "inicio": inicio,
+            "fim": fim,
+            "rotulo": f"{rotulo_base} ({ano})",
+            "tipo": "ano",
+        }
+
+    # TRIMESTRE / SEMESTRE / BIMESTRE
+    configuracoes = {
+        "trimestre": 3,
+        "semestre": 6,
+        "bimestre": 2,
+    }
+
+    for unidade, tamanho_meses in configuracoes.items():
+        desloc = deslocamento_unidade(unidade)
+        if desloc is None:
+            continue
+
+        indice_atual = (hoje.month - 1) // tamanho_meses
+        total_periodos_ano = 12 // tamanho_meses
+        absoluto = hoje.year * total_periodos_ano + indice_atual - desloc
+
+        ano = absoluto // total_periodos_ano
+        indice = absoluto % total_periodos_ano
+        mes_inicio = indice * tamanho_meses + 1
+        mes_fim = mes_inicio + tamanho_meses - 1
+
+        inicio = date(ano, mes_inicio, 1)
+        fim = _ultimo_dia_mes(ano, mes_fim)
+
+        numero_periodo = indice + 1
+        nome = {
+            "trimestre": "trimestre",
+            "semestre": "semestre",
+            "bimestre": "bimestre",
+        }[unidade]
+
+        rotulo_base = (
+            f"neste {nome}" if desloc == 0
+            else f"no {nome} passado" if desloc == 1
+            else f"no {nome} retrasado" if desloc == 2
+            else f"há {desloc} {nome}{'s' if desloc != 1 else ''}"
+        )
+
+        return {
+            "inicio": inicio,
+            "fim": fim,
+            "rotulo": (
+                f"{rotulo_base} "
+                f"({numero_periodo}º {nome} de {ano}: "
+                f"{inicio.strftime('%d/%m/%Y')} a {fim.strftime('%d/%m/%Y')})"
+            ),
+            "tipo": unidade,
+        }
+
+    return None
 
 
 def _periodo_diario_pergunta(pergunta):
@@ -2749,6 +2881,13 @@ def _periodo_diario_pergunta(pergunta):
     """
     texto = _texto_normalizado(pergunta)
     hoje = _data_atual_negocio()
+
+    # --------------------------------------------------------
+    # ANO / TRIMESTRE / SEMESTRE / BIMESTRE RELATIVOS
+    # --------------------------------------------------------
+    periodo_amplo = _periodo_relativo_amplo(pergunta)
+    if periodo_amplo is not None:
+        return periodo_amplo
 
     # --------------------------------------------------------
     # DATA EXPLÍCITA: 13/08/2026, 13-08-2026, dia 13/08
@@ -3017,6 +3156,34 @@ def corrigir_periodo_explicito(
         if match_ano
         else None
     )
+
+    # --------------------------------------------------------
+    # MÊS RELATIVO: atual / passado / retrasado / há N meses
+    # --------------------------------------------------------
+    texto_normalizado = _texto_normalizado(pergunta)
+    deslocamento_mes = None
+
+    if re.search(r"\b(?:mes atual|este mes|neste mes|nesse mes)\b", texto_normalizado):
+        deslocamento_mes = 0
+    elif re.search(r"\b(?:mes passado|mes anterior)\b", texto_normalizado):
+        deslocamento_mes = 1
+    elif re.search(r"\bmes retrasado\b", texto_normalizado):
+        deslocamento_mes = 2
+    else:
+        match_ha_meses = re.search(r"\bha\s+(\d+)\s+mes(?:es)?\b", texto_normalizado)
+        if match_ha_meses:
+            deslocamento_mes = int(match_ha_meses.group(1))
+
+    if deslocamento_mes is not None:
+        hoje = _data_atual_negocio()
+        total_meses = hoje.year * 12 + (hoje.month - 1) - deslocamento_mes
+        ano_relativo = total_meses // 12
+        mes_relativo = total_meses % 12 + 1
+
+        interpretacao.filtros.ano = str(ano_relativo)
+        interpretacao.filtros.mes = f"{mes_relativo:02d}"
+
+        return normalizar_interpretacao(interpretacao)
 
     pede_ano_inteiro = (
         _pergunta_pede_ano_inteiro(
@@ -11795,8 +11962,26 @@ def _periodo_mes_grafico_temporal(pergunta):
     - mês atual -> somente até hoje;
     - mês passado/futuro explícito -> usa os limites naturais do mês.
     """
-    ref = _mes_ano_explicitos_para_periodo(pergunta)
+    periodo_amplo = _periodo_relativo_amplo(pergunta)
     hoje = _data_atual_negocio()
+
+    if periodo_amplo is not None:
+        inicio = periodo_amplo["inicio"]
+        fim = periodo_amplo["fim"]
+
+        # Em período corrente, não cria pontos futuros.
+        if inicio <= hoje <= fim:
+            fim = hoje
+
+        return {
+            "ano": inicio.year,
+            "mes": inicio.month,
+            "inicio": inicio,
+            "fim": fim,
+            "rotulo": periodo_amplo["rotulo"],
+        }
+
+    ref = _mes_ano_explicitos_para_periodo(pergunta)
 
     ano = int(ref["ano"])
     mes = int(ref["mes"])
