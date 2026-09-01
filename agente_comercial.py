@@ -1803,14 +1803,14 @@ IMPORTANTE:
   "periodo_relativo" e NÃO tente calcular mês/ano por conta própria.
   O Python calculará a faixa exata de datas.
 - Estrutura de periodo_relativo:
-  {"unidade": "mes|ano|trimestre|semestre|bimestre", "deslocamento": N}
+  {{"unidade": "mes|ano|trimestre|semestre|bimestre", "deslocamento": N}}
 - Exemplos semânticos:
-  "este mês", "mês atual" -> {"unidade": "mes", "deslocamento": 0}
+  "este mês", "mês atual" -> {{"unidade": "mes", "deslocamento": 0}}
   "último mês", "mês passado", "mês anterior", "mês que passou"
-    -> {"unidade": "mes", "deslocamento": 1}
-  "mês retrasado" -> {"unidade": "mes", "deslocamento": 2}
+    -> {{"unidade": "mes", "deslocamento": 1}}
+  "mês retrasado" -> {{"unidade": "mes", "deslocamento": 2}}
   "último trimestre" / "trimestre passado"
-    -> {"unidade": "trimestre", "deslocamento": 1}
+    -> {{"unidade": "trimestre", "deslocamento": 1}}
   A mesma lógica vale para ano, semestre e bimestre.
 - Quando periodo_relativo for usado, NÃO preencha filtros.ano ou filtros.mes
   com uma data calculada ou herdada do contexto anterior.
