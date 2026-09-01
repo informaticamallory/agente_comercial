@@ -11954,32 +11954,109 @@ def _intervalos_semanais_no_mes(inicio, fim):
     return intervalos
 
 
-def _consultar_serie_semanal(indicador, inicio, fim, filtros_base=None):
+def _montar_dax_serie_semanal(indicador, inicio, fim, filtros_base=None):
     """
-    Consulta a medida diretamente em cada semana.
-    Não soma percentuais diários; cada indicador é recalculado pelo Power BI
-    no contexto correto da semana, preservando margens, metas e demais medidas.
+    Monta UMA única consulta DAX para todas as semanas do mês.
+
+    Cada ROW recalcula a medida dentro do intervalo daquela semana; portanto,
+    percentuais, margens, metas e demais medidas continuam sendo avaliados pelo
+    Power BI no contexto correto. Não há soma de percentuais diários.
     """
-    dados = []
+    medida = mapa_indicadores[indicador]["medida"]
+
+    # Mantém os defaults comerciais do dashboard, mas remove ano/mês porque
+    # o período será controlado diretamente por '# CALENDÁRIO'[data].
+    contexto_base = deepcopy(contexto_overview_comercial)
+    contexto_base.pop("ano", None)
+    contexto_base.pop("mes", None)
+
+    for chave, valor in dict(filtros_base or {}).items():
+        if chave not in {
+            "ano", "mes", "_data_inicio", "_data_fim", "_periodo_rotulo"
+        } and valor is not None:
+            contexto_base[chave] = valor
+
+    filtros_dax_base = gerar_filtros_dax(contexto_base)
+    blocos = []
 
     for numero, (ini_semana, fim_semana) in enumerate(
         _intervalos_semanais_no_mes(inicio, fim),
         start=1
     ):
-        filtros = dict(filtros_base or {})
-        filtros["_data_inicio"] = ini_semana.isoformat()
-        filtros["_data_fim"] = fim_semana.isoformat()
+        filtros_semana = list(filtros_dax_base)
+        filtros_semana.extend([
+            (
+                "'# CALENDÁRIO'[data] >= "
+                f"DATE({ini_semana.year}, {ini_semana.month}, {ini_semana.day})"
+            ),
+            (
+                "'# CALENDÁRIO'[data] <= "
+                f"DATE({fim_semana.year}, {fim_semana.month}, {fim_semana.day})"
+            ),
+        ])
 
-        valor = consultar_valor(
-            indicador,
-            filtros
+        filtros_texto = ",\n            ".join(filtros_semana)
+
+        bloco = (
+            'ROW(\n'
+            f'        "Numero", {numero},\n'
+            '        "Resultado",\n'
+            '        CALCULATE(\n'
+            f'            [{medida}],\n'
+            f'            {filtros_texto}\n'
+            '        )\n'
+            '    )'
+        )
+        blocos.append(bloco)
+
+    return "EVALUATE\nUNION(\n    " + ",\n    ".join(blocos) + "\n)"
+
+
+def _consultar_serie_semanal(indicador, inicio, fim, filtros_base=None):
+    """
+    Consulta todas as semanas em UMA única chamada ao Power BI.
+    Mantém o mesmo resultado funcional da implementação anterior, mas elimina
+    uma requisição HTTP separada para cada semana.
+    """
+    intervalos = _intervalos_semanais_no_mes(inicio, fim)
+
+    dax = _montar_dax_serie_semanal(
+        indicador,
+        inicio,
+        fim,
+        filtros_base
+    )
+
+    linhas = extrair_linhas(
+        executar_dax(dax)
+    )
+
+    valores_por_numero = {}
+
+    for linha in linhas:
+        numero = _valor_coluna_linha(linha, "[Numero]")
+        valor = _valor_coluna_linha(linha, "[Resultado]")
+
+        try:
+            numero = int(numero)
+        except Exception:
+            continue
+
+        valores_por_numero[numero] = (
+            valor if valor is not None else 0
         )
 
+    dados = []
+
+    for numero, (ini_semana, fim_semana) in enumerate(
+        intervalos,
+        start=1
+    ):
         dados.append({
             "numero": numero,
             "inicio": ini_semana,
             "fim": fim_semana,
-            "valor": valor if valor is not None else 0,
+            "valor": valores_por_numero.get(numero, 0),
         })
 
     return dados
