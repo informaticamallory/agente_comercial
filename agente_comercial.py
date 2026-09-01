@@ -4995,6 +4995,18 @@ def formatar_valor(
     )
 
 
+def _formatar_valor_periodo(valor, formato, filtros=None):
+    """
+    Em consultas com período diário explícito, ausência de linhas/valor
+    representa zero para apresentação ao usuário. Fora desse caminho,
+    preserva exatamente o comportamento anterior de formatar_valor().
+    """
+    if (filtros or {}).get("_periodo_rotulo") and valor is None:
+        valor = 0
+
+    return formatar_valor(valor, formato)
+
+
 # ============================================================
 # 35. NOME DO MÊS PARA RESPOSTA
 # ============================================================
@@ -5251,11 +5263,13 @@ def construir_resposta_valor(
     )
 
 
-    valor_formatado = formatar_valor(
+    valor_formatado = _formatar_valor_periodo(
 
         valor,
 
-        config["formato"]
+        config["formato"],
+
+        filtros
     )
 
 
@@ -6167,13 +6181,14 @@ def _construir_resposta_multiplos_indicadores(
             indicador
         )
 
-        valor = formatar_valor(
+        valor = _formatar_valor_periodo(
             dados.get(
                 indicador
             ),
             config[
                 "formato"
-            ]
+            ],
+            filtros
         )
 
         if contexto:
@@ -6223,13 +6238,14 @@ def _imagem_tabela_multiplos_indicadores(
             config[
                 "descricao"
             ],
-            formatar_valor(
+            _formatar_valor_periodo(
                 dados.get(
                     indicador
                 ),
                 config[
                     "formato"
-                ]
+                ],
+                filtros
             )
         ])
 
@@ -11726,6 +11742,352 @@ def _resposta_resumo_gerencial_tabela(pergunta):
     }
 
 
+
+# ============================================================
+# 42AA. GRÁFICOS TEMPORAIS EM NÍVEL DE DIA / SEMANA
+# ============================================================
+#
+# Esta rotina é ADITIVA: não substitui os gráficos mensais,
+# rankings, comparações ou gráficos combinados existentes.
+# Ela só assume o processamento quando a pergunta pede
+# explicitamente granularidade diária ou semanal.
+#
+
+def _granularidade_grafico_dia_semana(pergunta):
+    """Detecta apenas pedidos explícitos de série diária/semanal."""
+    t = _texto_normalizado(pergunta)
+
+    if any(
+        termo in t
+        for termo in [
+            "dia a dia",
+            "por dia",
+            "diariamente",
+            "diario",
+            "diaria",
+        ]
+    ):
+        return "dia"
+
+    if any(
+        termo in t
+        for termo in [
+            "por semana",
+            "semana a semana",
+            "semanalmente",
+            "semanal",
+        ]
+    ):
+        return "semana"
+
+    return None
+
+
+def _periodo_mes_grafico_temporal(pergunta):
+    """
+    Define o mês da série diária/semanal.
+
+    Regra de negócio:
+    - mês não informado -> mês atual;
+    - ano não informado -> ano atual;
+    - mês atual -> somente até hoje;
+    - mês passado/futuro explícito -> usa os limites naturais do mês.
+    """
+    ref = _mes_ano_explicitos_para_periodo(pergunta)
+    hoje = _data_atual_negocio()
+
+    ano = int(ref["ano"])
+    mes = int(ref["mes"])
+
+    inicio = date(ano, mes, 1)
+    fim_mes = _ultimo_dia_mes(ano, mes)
+
+    # Para o mês corrente, não cria pontos futuros.
+    if ano == hoje.year and mes == hoje.month:
+        fim = min(fim_mes, hoje)
+    else:
+        fim = fim_mes
+
+    nome_mes = meses_nome.get(f"{mes:02d}", f"{mes:02d}")
+
+    return {
+        "ano": ano,
+        "mes": mes,
+        "inicio": inicio,
+        "fim": fim,
+        "rotulo": f"{nome_mes} de {ano}",
+    }
+
+
+def _filtros_comerciais_grafico_temporal(pergunta):
+    """
+    Reaproveita os filtros comerciais já existentes do agente,
+    mas deixa a data sob controle desta série temporal.
+    """
+    filtros = dict(
+        _filtros_base_grafico(pergunta)
+        or {}
+    )
+
+    filtros.pop("ano", None)
+    filtros.pop("mes", None)
+    filtros.pop("_data_inicio", None)
+    filtros.pop("_data_fim", None)
+    filtros.pop("_periodo_rotulo", None)
+
+    return filtros
+
+
+def _montar_dax_serie_diaria(indicador, inicio, fim, filtros_base=None):
+    """Consulta todos os dias do intervalo em uma única chamada ao Power BI."""
+    medida = mapa_indicadores[indicador]["medida"]
+
+    filtros = dict(filtros_base or {})
+    filtros["_data_inicio"] = inicio.isoformat()
+    filtros["_data_fim"] = fim.isoformat()
+
+    contexto = montar_contexto_final(
+        contexto_overview_comercial,
+        filtros
+    )
+
+    filtros_dax = gerar_filtros_dax(contexto)
+    filtros_texto = ",\n        ".join(filtros_dax)
+
+    if filtros_texto:
+        corpo = f"""
+CALCULATETABLE(
+    SUMMARIZECOLUMNS(
+        '# CALENDÁRIO'[data],
+        \"Resultado\", [{medida}]
+    ),
+        {filtros_texto}
+)"""
+    else:
+        corpo = f"""
+SUMMARIZECOLUMNS(
+    '# CALENDÁRIO'[data],
+    \"Resultado\", [{medida}]
+)"""
+
+    return f"""
+EVALUATE
+{corpo}
+ORDER BY '# CALENDÁRIO'[data]
+"""
+
+
+def _valor_coluna_linha(linha, sufixo):
+    """Obtém uma coluna do executeQueries sem depender do prefixo usado pela API."""
+    for chave, valor in linha.items():
+        chave_norm = str(chave).lower().replace(" ", "")
+        if chave_norm.endswith(sufixo.lower().replace(" ", "")):
+            return valor
+    return None
+
+
+def _consultar_serie_diaria(indicador, inicio, fim, filtros_base=None):
+    dax = _montar_dax_serie_diaria(
+        indicador,
+        inicio,
+        fim,
+        filtros_base
+    )
+
+    linhas = extrair_linhas(
+        executar_dax(dax)
+    )
+
+    por_data = {}
+
+    for linha in linhas:
+        bruto_data = _valor_coluna_linha(linha, "[data]")
+        valor = linha.get("[Resultado]")
+
+        if bruto_data is None:
+            continue
+
+        try:
+            texto_data = str(bruto_data)[:10]
+            data_linha = datetime.strptime(
+                texto_data,
+                "%Y-%m-%d"
+            ).date()
+        except Exception:
+            continue
+
+        por_data[data_linha] = (
+            valor if valor is not None else 0
+        )
+
+    # Inclui também dias sem movimento como zero.
+    dados = []
+    atual = inicio
+
+    while atual <= fim:
+        dados.append({
+            "data": atual,
+            "valor": por_data.get(atual, 0),
+        })
+        atual += timedelta(days=1)
+
+    return dados
+
+
+def _intervalos_semanais_no_mes(inicio, fim):
+    """
+    Gera semanas de segunda a domingo, recortadas pelos limites do mês.
+    Assim nenhum dia de outro mês entra no gráfico solicitado.
+    """
+    intervalos = []
+    atual = inicio
+
+    while atual <= fim:
+        fim_semana_calendario = atual + timedelta(
+            days=(6 - atual.weekday())
+        )
+        fim_bloco = min(fim_semana_calendario, fim)
+
+        intervalos.append((atual, fim_bloco))
+        atual = fim_bloco + timedelta(days=1)
+
+    return intervalos
+
+
+def _consultar_serie_semanal(indicador, inicio, fim, filtros_base=None):
+    """
+    Consulta a medida diretamente em cada semana.
+    Não soma percentuais diários; cada indicador é recalculado pelo Power BI
+    no contexto correto da semana, preservando margens, metas e demais medidas.
+    """
+    dados = []
+
+    for numero, (ini_semana, fim_semana) in enumerate(
+        _intervalos_semanais_no_mes(inicio, fim),
+        start=1
+    ):
+        filtros = dict(filtros_base or {})
+        filtros["_data_inicio"] = ini_semana.isoformat()
+        filtros["_data_fim"] = fim_semana.isoformat()
+
+        valor = consultar_valor(
+            indicador,
+            filtros
+        )
+
+        dados.append({
+            "numero": numero,
+            "inicio": ini_semana,
+            "fim": fim_semana,
+            "valor": valor if valor is not None else 0,
+        })
+
+    return dados
+
+
+def gerar_grafico_temporal_dia_semana(pergunta, indicador=None):
+    """
+    Gera gráfico diário ou semanal para qualquer indicador existente em
+    mapa_indicadores. Se não houver mês/ano na pergunta, usa o mês/ano atuais.
+    """
+    granularidade = _granularidade_grafico_dia_semana(pergunta)
+
+    if granularidade is None:
+        return None
+
+    indicador = indicador or _indicador_da_pergunta(pergunta)
+
+    if indicador not in mapa_indicadores:
+        return None
+
+    config = mapa_indicadores[indicador]
+    periodo = _periodo_mes_grafico_temporal(pergunta)
+    filtros_base = _filtros_comerciais_grafico_temporal(pergunta)
+
+    tipo_explicito = _tipo_grafico_solicitado(pergunta)
+    tipo = tipo_explicito or "barras"
+    adicionar_tendencia = _usuario_pediu_linha_tendencia(pergunta)
+    cores = _cores_grafico_simples(pergunta)
+
+    if granularidade == "dia":
+        serie = _consultar_serie_diaria(
+            indicador,
+            periodo["inicio"],
+            periodo["fim"],
+            filtros_base
+        )
+
+        rotulos = [
+            item["data"].strftime("%d/%m")
+            for item in serie
+        ]
+        valores = [
+            item["valor"]
+            for item in serie
+        ]
+
+        titulo = (
+            f"{config['descricao']} dia a dia - "
+            f"{periodo['rotulo'].capitalize()}"
+        )
+        resposta = (
+            f"📊 {config['descricao']} dia a dia de "
+            f"{periodo['rotulo']}."
+        )
+        nome_arquivo = "grafico_diario.png"
+
+    else:
+        serie = _consultar_serie_semanal(
+            indicador,
+            periodo["inicio"],
+            periodo["fim"],
+            filtros_base
+        )
+
+        rotulos = [
+            (
+                f"Sem. {item['numero']}\n"
+                f"{item['inicio'].strftime('%d/%m')}–"
+                f"{item['fim'].strftime('%d/%m')}"
+            )
+            for item in serie
+        ]
+        valores = [
+            item["valor"]
+            for item in serie
+        ]
+
+        titulo = (
+            f"{config['descricao']} por semana - "
+            f"{periodo['rotulo'].capitalize()}"
+        )
+        resposta = (
+            f"📊 {config['descricao']} por semana de "
+            f"{periodo['rotulo']}."
+        )
+        nome_arquivo = "grafico_semanal.png"
+
+    imagem = _grafico_png_base64(
+        tipo,
+        titulo,
+        rotulos,
+        valores,
+        config["descricao"],
+        config["formato"],
+        adicionar_tendencia,
+        cores["serie"],
+        cores["tendencia"]
+    )
+
+    return {
+        "tipo_resposta": "grafico",
+        "tipo_grafico": tipo,
+        "resposta": resposta,
+        "imagem_base64": imagem,
+        "nome_arquivo": nome_arquivo,
+    }
+
+
 def gerar_resposta_grafico(pergunta):
     if not usuario_pediu_grafico(pergunta):
         return None
@@ -11742,6 +12104,18 @@ def gerar_resposta_grafico(pergunta):
 
     if resumo_gerencial_tabela is not None:
         return resumo_gerencial_tabela
+
+    # --------------------------------------------------------
+    # NOVO CAMINHO ADITIVO: série diária / semanal.
+    # Só entra quando a granularidade foi pedida explicitamente.
+    # O restante dos gráficos antigos permanece abaixo, intacto.
+    # --------------------------------------------------------
+    temporal_dia_semana = gerar_grafico_temporal_dia_semana(
+        pergunta
+    )
+
+    if temporal_dia_semana is not None:
+        return temporal_dia_semana
 
     # Gráfico combinado tem prioridade sobre a interpretação
     # de indicador único.
