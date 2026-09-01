@@ -5456,8 +5456,14 @@ def nome_mes_resposta(
         ]
 
 
+    # Aceita tanto mês numérico inteiro (8) quanto texto numérico ("08").
+    # O dicionário meses_nome usa chaves no formato "01".."12".
+    chave_mes = str(mes).strip()
+    if chave_mes.isdigit():
+        chave_mes = chave_mes.zfill(2)
+
     return meses_nome.get(
-        mes,
+        chave_mes,
         mes
     )
 
