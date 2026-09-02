@@ -823,7 +823,14 @@ class PeriodoRelativoPergunta(BaseModel):
         "semestre",
         "bimestre"
     ]
+    # Para períodos relativos: 0=atual, 1=passado, 2=retrasado...
     deslocamento: int = 0
+    # Para períodos calendários explícitos: 1º/2º semestre,
+    # 1º..4º trimestre, 1º..6º bimestre ou mês 1..12.
+    # Quando informado, tem prioridade sobre deslocamento.
+    indice: Optional[int] = None
+    # Ano explícito, quando o usuário informar. Se omitido, Python usa o ano atual.
+    ano: Optional[int] = None
 
 
 class InterpretacaoPergunta(BaseModel):
@@ -1803,15 +1810,22 @@ IMPORTANTE:
   "periodo_relativo" e NÃO tente calcular mês/ano por conta própria.
   O Python calculará a faixa exata de datas.
 - Estrutura de periodo_relativo:
-  {{"unidade": "mes|ano|trimestre|semestre|bimestre", "deslocamento": N}}
-- Exemplos semânticos:
+  {{"unidade": "mes|ano|trimestre|semestre|bimestre", "deslocamento": N, "indice": null, "ano": null}}
+- Para período RELATIVO, use deslocamento:
   "este mês", "mês atual" -> {{"unidade": "mes", "deslocamento": 0}}
   "último mês", "mês passado", "mês anterior", "mês que passou"
     -> {{"unidade": "mes", "deslocamento": 1}}
   "mês retrasado" -> {{"unidade": "mes", "deslocamento": 2}}
   "último trimestre" / "trimestre passado"
     -> {{"unidade": "trimestre", "deslocamento": 1}}
-  A mesma lógica vale para ano, semestre e bimestre.
+- Para período CALENDÁRIO explícito, use indice e deixe o Python calcular as datas:
+  "primeiro semestre", "primeira metade do ano", "seis primeiros meses"
+    -> {{"unidade": "semestre", "deslocamento": 0, "indice": 1}}
+  "segundo semestre" -> {{"unidade": "semestre", "deslocamento": 0, "indice": 2}}
+  "primeiro trimestre" -> {{"unidade": "trimestre", "deslocamento": 0, "indice": 1}}
+  "terceiro bimestre de 2025" -> {{"unidade": "bimestre", "deslocamento": 0, "indice": 3, "ano": 2025}}
+  "agosto" pode continuar sendo informado em filtros.mes; não invente datas.
+  A mesma lógica semântica vale para expressões equivalentes, mesmo que não estejam escritas literalmente aqui.
 - Quando periodo_relativo for usado, NÃO preencha filtros.ano ou filtros.mes
   com uma data calculada ou herdada do contexto anterior.
 - NÃO invente um indicador, dimensão, filtro ou operação que não exista
@@ -3257,9 +3271,9 @@ def _periodo_relativo_da_interpretacao(interpretacao):
     """
     Converte a intenção temporal normalizada pela IA em datas reais.
 
-    A IA informa somente a unidade e o deslocamento. O cálculo de datas
-    continua determinístico no Python, evitando que expressões como
-    "último mês" dependam de a IA adivinhar que mês é esse.
+    A IA entende a linguagem; o Python é a fonte de verdade para datas.
+    Suporta tanto períodos relativos (último mês, trimestre passado etc.)
+    quanto períodos calendários (primeiro semestre, terceiro trimestre etc.).
     """
     if interpretacao is None:
         return None
@@ -3269,6 +3283,7 @@ def _periodo_relativo_da_interpretacao(interpretacao):
         return None
 
     unidade = getattr(periodo_ia, "unidade", None)
+    hoje = _data_atual_negocio()
 
     try:
         deslocamento = int(getattr(periodo_ia, "deslocamento", 0))
@@ -3278,8 +3293,61 @@ def _periodo_relativo_da_interpretacao(interpretacao):
     if deslocamento < 0 or deslocamento > 120:
         return None
 
-    hoje = _data_atual_negocio()
+    indice = getattr(periodo_ia, "indice", None)
+    ano_ia = getattr(periodo_ia, "ano", None)
 
+    try:
+        indice = int(indice) if indice is not None else None
+        ano_ia = int(ano_ia) if ano_ia is not None else None
+    except (TypeError, ValueError):
+        return None
+
+    # --------------------------------------------------------
+    # PERÍODO CALENDÁRIO EXPLÍCITO INTERPRETADO PELA IA
+    # Ex.: primeiro semestre -> semestre, indice=1.
+    # --------------------------------------------------------
+    if indice is not None:
+        ano = ano_ia or hoje.year
+
+        tamanhos = {
+            "mes": 1,
+            "bimestre": 2,
+            "trimestre": 3,
+            "semestre": 6,
+        }
+        limites = {
+            "mes": 12,
+            "bimestre": 6,
+            "trimestre": 4,
+            "semestre": 2,
+        }
+
+        tamanho = tamanhos.get(unidade)
+        limite = limites.get(unidade)
+        if tamanho is None or limite is None or not (1 <= indice <= limite):
+            return None
+
+        mes_inicio = (indice - 1) * tamanho + 1
+        mes_fim = mes_inicio + tamanho - 1
+        inicio = date(ano, mes_inicio, 1)
+        fim = _ultimo_dia_mes(ano, mes_fim)
+
+        if unidade == "mes":
+            nome_mes = meses_nome.get(f"{indice:02d}", f"{indice:02d}")
+            rotulo = f"em {nome_mes} de {ano}"
+        else:
+            rotulo = f"no {indice}º {unidade} de {ano}"
+
+        return {
+            "inicio": inicio,
+            "fim": fim,
+            "rotulo": rotulo,
+            "tipo": unidade,
+        }
+
+    # --------------------------------------------------------
+    # PERÍODO RELATIVO
+    # --------------------------------------------------------
     if unidade == "mes":
         total_meses = hoje.year * 12 + (hoje.month - 1) - deslocamento
         ano = total_meses // 12
@@ -3295,7 +3363,7 @@ def _periodo_relativo_da_interpretacao(interpretacao):
         }
 
     if unidade == "ano":
-        ano = hoje.year - deslocamento
+        ano = (ano_ia or hoje.year) - deslocamento
         return {
             "inicio": date(ano, 1, 1),
             "fim": date(ano, 12, 31),
@@ -3308,7 +3376,6 @@ def _periodo_relativo_da_interpretacao(interpretacao):
         "semestre": 6,
         "bimestre": 2,
     }
-
     tamanho_meses = tamanhos.get(unidade)
     if tamanho_meses is None:
         return None
@@ -3317,8 +3384,8 @@ def _periodo_relativo_da_interpretacao(interpretacao):
     total_periodos_ano = 12 // tamanho_meses
     absoluto = hoje.year * total_periodos_ano + indice_atual - deslocamento
     ano = absoluto // total_periodos_ano
-    indice = absoluto % total_periodos_ano
-    mes_inicio = indice * tamanho_meses + 1
+    indice_calc = absoluto % total_periodos_ano
+    mes_inicio = indice_calc * tamanho_meses + 1
     mes_fim = mes_inicio + tamanho_meses - 1
     inicio = date(ano, mes_inicio, 1)
     fim = _ultimo_dia_mes(ano, mes_fim)
@@ -3326,13 +3393,9 @@ def _periodo_relativo_da_interpretacao(interpretacao):
     return {
         "inicio": inicio,
         "fim": fim,
-        "rotulo": (
-            f"no {indice + 1}º {unidade} de {ano} "
-            f"({inicio.strftime('%d/%m/%Y')} a {fim.strftime('%d/%m/%Y')})"
-        ),
+        "rotulo": f"no {indice_calc + 1}º {unidade} de {ano}",
         "tipo": unidade,
     }
-
 
 def _aplicar_periodo_calendario(pergunta, filtros, interpretacao=None):
     """
@@ -3341,13 +3404,13 @@ def _aplicar_periodo_calendario(pergunta, filtros, interpretacao=None):
     limitar intervalos que atravessam mês ou ano.
 
     Prioridade:
-    1) regras temporais locais já existentes;
-    2) período relativo normalizado pela IA, apenas como fallback.
+    1) período normalizado semanticamente pela IA, quando disponível;
+    2) regras temporais locais já existentes como fallback de segurança.
     """
-    periodo = _periodo_diario_pergunta(pergunta)
+    periodo = _periodo_relativo_da_interpretacao(interpretacao)
 
     if periodo is None:
-        periodo = _periodo_relativo_da_interpretacao(interpretacao)
+        periodo = _periodo_diario_pergunta(pergunta)
 
     if periodo is None:
         return dict(filtros or {})
@@ -4479,203 +4542,80 @@ def _interpretar_indicador_por_dimensao_generico(pergunta):
 
 
 def interpretar_pergunta(pergunta):
+    """
+    IA é o interpretador principal da linguagem natural.
 
-    # ========================================================
-    # QUALQUER INDICADOR POR QUALQUER DIMENSÃO
-    # ========================================================
-    interpretacao_generica = (
-        _interpretar_indicador_por_dimensao_generico(
-            pergunta
-        )
-    )
+    Ordem:
+    1) Groq
+    2) Gemini
+    3) Claude
+    4) regras locais existentes como fallback de segurança
 
-    if interpretacao_generica is not None:
-        return (
-            interpretacao_generica,
-            "local_dimensao_generica"
-        )
-
-    # ========================================================
-    # AJUSTES NOVOS - ROTA LOCAL SEGURA
-    # ========================================================
-    nova_interpretacao = _interpretar_ajustes_hoje(
-        pergunta
-    )
-
-    if nova_interpretacao is not None:
-        return nova_interpretacao, "local_ajustes_hoje"
-
-    # ========================================================
-    # IDENTIFICAR PERGUNTAS ANALÍTICAS MAIS COMPLEXAS
-    # ========================================================
-
-    complexa = pergunta_analitica_complexa(pergunta)
-
-    # ========================================================
-    # INTERPRETAÇÃO LOCAL SOMENTE PARA PERGUNTAS SIMPLES
-    # ========================================================
-
-    if not complexa:
-
-        interpretacao_local = (
-            interpretar_simples_localmente(
-                pergunta
-            )
-        )
-
-        if interpretacao_local is not None:
-
-            print(
-                "Interpretação local utilizada "
-                "(Groq não foi chamada)."
-            )
-
-            return (
-                interpretacao_local,
-                "local"
-            )
-
-    else:
-
-        print(
-            "Pergunta analítica detectada. "
-            "Interpretação local ignorada."
-        )
+    Python continua validando o schema, corrigindo agrupamentos explícitos
+    e calculando datas. As regras locais não foram removidas.
+    """
 
     # --------------------------------------------------------
-    # LOCAL SÓ PARA CONTINUAÇÕES
+    # 1. GROQ — INTERPRETADOR PRINCIPAL
     # --------------------------------------------------------
-
-    if (
-        not complexa
-        and parece_continuacao(pergunta)
-    ):
-
-        local = interpretar_localmente(
-            pergunta
-        )
-
-        if local is not None:
-
-            return local, "local"
-
-    # --------------------------------------------------------
-    # IA SEMÂNTICA (GROQ)
-    # --------------------------------------------------------
-    # Tudo que já foi reconhecido com segurança pelas rotas locais
-    # retorna antes daqui. Quando surgir uma forma nova de perguntar,
-    # a IA interpreta o significado e normaliza para os conceitos
-    # canônicos já suportados pelo agente.
-
     try:
-
-        interpretacao = (
-            interpretar_com_groq(
-                pergunta
-            )
-        )
-
-        interpretacao = (
-            corrigir_agrupamento_explicito(
-                pergunta,
-                interpretacao
-            )
-        )
-
-        interpretacao = (
-            corrigir_periodo_explicito(
-                pergunta,
-                interpretacao
-            )
-        )
-
-        print("IA utilizada: GROQ")
-        return (
-            interpretacao,
-            "groq"
-        )
-
+        interpretacao = interpretar_com_groq(pergunta)
+        interpretacao = corrigir_agrupamento_explicito(pergunta, interpretacao)
+        interpretacao = corrigir_periodo_explicito(pergunta, interpretacao)
+        print("IA utilizada: GROQ (interpretador principal)")
+        return interpretacao, "groq"
     except Exception as erro:
-
-        print(
-            "Groq falhou:",
-            type(erro).__name__,
-            "-",
-            str(erro)[:300]
-        )
+        print("Groq falhou:", type(erro).__name__, "-", str(erro)[:300])
 
     # --------------------------------------------------------
-    # GEMINI
+    # 2. GEMINI — FALLBACK DE IA
     # --------------------------------------------------------
-
     try:
-
-        interpretacao = (
-            interpretar_com_gemini(
-                pergunta
-            )
-        )
-
-        interpretacao = (
-            corrigir_agrupamento_explicito(
-                pergunta,
-                interpretacao
-            )
-        )
-
-        interpretacao = (
-            corrigir_periodo_explicito(
-                pergunta,
-                interpretacao
-            )
-        )
-
+        interpretacao = interpretar_com_gemini(pergunta)
+        interpretacao = corrigir_agrupamento_explicito(pergunta, interpretacao)
+        interpretacao = corrigir_periodo_explicito(pergunta, interpretacao)
         print("IA utilizada: GEMINI (fallback)")
-        return (
-            interpretacao,
-            "gemini"
-        )
-
+        return interpretacao, "gemini"
     except Exception as erro:
-
-        print(
-            "Gemini falhou:",
-            type(erro).__name__,
-            "-",
-            str(erro)[:300]
-        )
+        print("Gemini falhou:", type(erro).__name__, "-", str(erro)[:300])
 
     # --------------------------------------------------------
-    # CLAUDE - SEGUNDO FALLBACK
+    # 3. CLAUDE — SEGUNDO FALLBACK DE IA
     # --------------------------------------------------------
-
     try:
         interpretacao = interpretar_com_claude(pergunta)
-
-        interpretacao = corrigir_agrupamento_explicito(
-            pergunta,
-            interpretacao
-        )
-
-        interpretacao = corrigir_periodo_explicito(
-            pergunta,
-            interpretacao
-        )
-
+        interpretacao = corrigir_agrupamento_explicito(pergunta, interpretacao)
+        interpretacao = corrigir_periodo_explicito(pergunta, interpretacao)
         print("IA utilizada: CLAUDE (fallback)")
         return interpretacao, "claude"
-
     except Exception as erro:
-        print(
-            "Claude falhou:",
-            type(erro).__name__,
-            "-",
-            str(erro)[:300]
-        )
+        print("Claude falhou:", type(erro).__name__, "-", str(erro)[:300])
 
-    raise RuntimeError(
-        "Nenhum interpretador disponível."
-    )
+    # --------------------------------------------------------
+    # 4. FALLBACK LOCAL — PRESERVA TUDO QUE JÁ FUNCIONAVA
+    # --------------------------------------------------------
+    interpretacao_generica = _interpretar_indicador_por_dimensao_generico(pergunta)
+    if interpretacao_generica is not None:
+        print("Fallback local utilizado: dimensão genérica")
+        return interpretacao_generica, "local_dimensao_generica"
+
+    nova_interpretacao = _interpretar_ajustes_hoje(pergunta)
+    if nova_interpretacao is not None:
+        print("Fallback local utilizado: ajustes existentes")
+        return nova_interpretacao, "local_ajustes_hoje"
+
+    interpretacao_local = interpretar_simples_localmente(pergunta)
+    if interpretacao_local is not None:
+        print("Fallback local utilizado: interpretação simples")
+        return interpretacao_local, "local"
+
+    if parece_continuacao(pergunta):
+        local = interpretar_localmente(pergunta)
+        if local is not None:
+            print("Fallback local utilizado: continuação")
+            return local, "local"
+
+    raise RuntimeError("Nenhum interpretador disponível.")
 
 
 # ============================================================
